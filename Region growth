@@ -1,0 +1,71 @@
+from osgeo import gdal
+import numpy as np
+from tqdm import tqdm
+from collections import deque
+import os
+def merge_pixels(input_raster, output_raster, threshold, target_value):
+    try:
+        dataset = gdal.Open(input_raster)
+        if dataset is None:
+            raise Exception("无法打开输入文件")
+        band = dataset.GetRasterBand(1)
+        data = band.ReadAsArray()
+        rows, cols = data.shape
+        nodata = band.GetNoDataValue()
+
+        if nodata is not None:
+            data[data == nodata] = 0
+
+        output_data = np.copy(data)
+        processed = np.zeros(data.shape, dtype=bool)
+        queue = deque()
+
+        for i in range(rows):
+            for j in range(cols):
+                if data[i, j] >= target_value and not processed[i, j]:
+                    output_data[i, j] = target_value
+                    processed[i, j] = True
+                    queue.append((i, j))
+
+        total_pixels = sum(processed[i, j] for i in range(rows) for j in range(cols))
+        pbar = tqdm(total=total_pixels, desc='Processing pixels')
+        while queue:
+            y, x = queue.popleft()
+            pbar.update(1)
+            for di, dj in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                ni, nj = y + di, x + dj
+                if 0 <= ni < rows and 0 <= nj < cols and not processed[ni, nj]:
+                    if abs(data[ni, nj] - target_value) < threshold:
+                        output_data[ni, nj] = target_value
+                        processed[ni, nj] = True
+                        queue.append((ni, nj))
+                        pbar.update(1)
+        pbar.close()
+        # 剔除非target_value的像素值
+        output_data[output_data != target_value] = 0
+        driver = gdal.GetDriverByName('GTiff')
+        out_dataset = driver.Create(output_raster, cols, rows, 1, gdal.GDT_Float32)
+        if out_dataset is None:
+            raise Exception("无法创建输出文件")
+        out_band = out_dataset.GetRasterBand(1)
+        out_band.SetNoDataValue(0)  # 设置nodata值为0
+        out_band.WriteArray(output_data)
+        out_band.FlushCache()
+        out_dataset.SetGeoTransform(dataset.GetGeoTransform())
+        out_dataset.SetProjection(dataset.GetProjection())
+        out_dataset = None
+        dataset = None
+        print(f"处理完成: {output_raster}")
+    except Exception as e:
+        print(f"处理 {input_raster} 时发生错误: {e}")
+# 使用示例
+input_file = r"XXX.tif" #输入待处理文件
+output_dir = r"XXX"     #将输出文件保存到对应文件夹
+threshold_values = [0.1] #可根据实际情况手动调整
+target_values = [2.0]    #可根据实际情况手动调整
+for threshold in threshold_values:
+    for target in target_values:
+        input_raster = input_file
+        output_filename = f"qd-{target:.2f}_{threshold:.3f}.tif"
+        output_raster = os.path.join(output_dir, output_filename)
+        merge_pixels(input_raster, output_raster, threshold, target)
