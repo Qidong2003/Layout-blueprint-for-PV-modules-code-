@@ -1,0 +1,78 @@
+from osgeo import gdal, gdalconst
+import numpy as np
+import cv2
+import os
+from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# 设置输入和输出文件夹路径
+input_folder_path = r"XXX"#输入待处理文件
+output_folder_path = r"XXX"#将输出文件保存到对应文件夹
+
+# 确保输出文件夹存在
+os.makedirs(output_folder_path, exist_ok=True)
+
+CONNECTIVITY = 8
+MIN_AREA_RATIO = 0.01
+MAX_WORKERS = min(4, os.cpu_count() or 1)
+
+
+def process_image(file_name):
+    """
+    处理单个图像文件，包括连通区域分析和滤波
+    """
+    input_path = os.path.join(input_folder_path, file_name)
+    output_path = os.path.join(output_folder_path, file_name)
+
+    dataset = gdal.Open(input_path, gdalconst.GA_ReadOnly)
+    if dataset is None:
+        print(f"Error: Image {file_name} not found.")
+        return
+
+    try:
+        band = dataset.GetRasterBand(1)
+        image = band.ReadAsArray()
+
+        # 显示每个TIF文件中存在的不同值及其栅格数量
+        unique_values, counts = np.unique(image, return_counts=True)
+        value_counts = dict(zip(unique_values, counts))
+        print(f"File: {file_name} - Unique values and their counts:")
+        for value, count in value_counts.items():
+            print(f"Value {value}: Count {count}")
+
+        non_zero_cells = np.count_nonzero(image)
+        area_threshold = max(1, int(non_zero_cells * MIN_AREA_RATIO))  # 确保阈值至少为1
+
+        processed_image = np.copy(image)
+        binary_image = np.where(image == 0, 1, 0).astype(np.uint8)  # 将0值设为前景
+
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary_image, connectivity=CONNECTIVITY)
+
+        if num_labels > 1:
+            areas = stats[1:, cv2.CC_STAT_AREA]  # 排除背景
+            small_regions = np.where(areas < area_threshold)[0] + 1  # 索引修正
+            mask = np.isin(labels, small_regions)
+            processed_image[mask] = 255  # 将小连通区域设为255
+
+        # 创建输出数据集
+        driver = gdal.GetDriverByName('GTiff')
+        output_dataset = driver.CreateCopy(output_path, dataset, 0)
+        output_band = output_dataset.GetRasterBand(1)
+        output_band.WriteArray(processed_image)
+        output_band.FlushCache()
+
+    finally:
+        dataset = None
+        if 'output_dataset' in locals():
+            output_dataset = None
+
+
+# 获取输入文件夹中所有的TIF文件
+tif_files = [f for f in os.listdir(input_folder_path) if f.endswith('.tif')]
+
+with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    futures = [executor.submit(process_image, file_name) for file_name in tif_files]
+    for _ in tqdm(as_completed(futures), total=len(futures), desc="Processing TIF files"):
+        pass
+
+print("All files processed.")
